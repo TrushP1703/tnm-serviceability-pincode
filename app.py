@@ -1,73 +1,97 @@
 import streamlit as st
 import pandas as pd
-import os
+import requests
+from io import StringIO
 
-# Get sheet URL from environment variable
-SHEET_URL = os.getenv("GSHEET_URL")
+# Read the Google Sheet CSV (hidden via environment variable or hardcoded here)
+SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTC7eGFDO4cthDWrY91NA5O97zFMeNREoy_wE5qDqCY6BcI__tBjsLJuZxAvaUyV48ZMZRJSQP1W-5G/pub?gid=0&single=true&output=csv"
 
-# App title and intro
+# Load data from Google Sheet
+@st.cache_data
+def load_data():
+    response = requests.get(SHEET_URL)
+    df = pd.read_csv(StringIO(response.text), dtype={'Pincode': str})
+    return df
+
+df = load_data()
+
+# Set page config
 st.set_page_config(page_title="TNM Serviceability Checker", layout="centered")
-st.markdown("## 📦 TNM Serviceability Checker")
-st.markdown("Easily check if a pincode is serviceable by your selected service type.")
+st.markdown("<h1 style='text-align: center;'>📦 TNM Serviceability Checker</h1>", unsafe_allow_html=True)
+st.markdown("#### <div style='text-align: center;'>Easily check if a pincode is serviceable by your selected service type.</div>", unsafe_allow_html=True)
 
-# Service type input
+# UI Inputs
 service_type = st.selectbox("🛠️ Service Type", ["4W_Tyre", "4W_Battery", "2W_Tyre", "2W_Battery"])
-pincode_input = st.text_input("🏣 Enter Pincode")
+pincode = st.text_input("📍 Enter Pincode", max_chars=6)
 
-# Button to trigger lookup
-if st.button("🔍 Check Serviceability"):
-    if not pincode_input.isdigit():
+# Button
+check = st.button("🔍 Check Serviceability")
+
+# Mapping
+SERVICE_COLUMN = {
+    "4W_Tyre": "4W Tyre Order",
+    "4W_Battery": "4W Battery Order",
+    "2W_Tyre": "2W Tyre Order",
+    "2W_Battery": "2W Battery Order"
+}
+VENDOR_COLUMN = {
+    "4W_Tyre": "4W Tyre (vendor fitment)",
+    "4W_Battery": "Battery (vendor fitment)",
+    "2W_Battery": "Battery (vendor fitment)",  # Shared column
+}
+FEE_COLUMN = {
+    "4W_Tyre": "Extra fitment fees 4W Tyre if applicable in Rs.",
+    "4W_Battery": "Extra fitment fees 4W Battery if applicable in Rs.",
+    "2W_Tyre": "Extra fitment fees 2W Tyre if applicable in Rs.",
+    "2W_Battery": "Extra fitment fees 2W Battery if applicable in Rs.",
+}
+
+# Logic
+if check:
+    if not pincode.isdigit():
         st.error("🚫 Invalid pincode. Enter a number like 400001.")
     else:
-        df = pd.read_csv(SHEET_URL)
-        df['Pincode'] = df['Pincode'].astype(str)
-
-        row = df[df['Pincode'] == pincode_input]
-
+        row = df[df['Pincode'] == pincode]
         if row.empty:
-            st.error("❌ Not Serviceable")
+            st.error("🚫 Pincode not found.")
         else:
-            service_value = row.iloc[0][f"{service_type.replace('_', ' ')} Order"]
-            vendor_column = None
+            row = row.iloc[0]
 
-            if service_type == "4W_Tyre":
-                vendor_column = "4W Tyre (vendor fitment)"
-            elif service_type == "4W_Battery":
-                vendor_column = "Battery (vendor fitment)"
-            elif service_type == "2W_Battery":
-                vendor_column = "Battery (vendor fitment)"
+            is_serviceable = row[SERVICE_COLUMN[service_type]].strip().lower() == "yes"
 
-            if service_value.strip().lower() == "yes":
+            # Check for special case: only 4W_Tyre = Yes, rest No
+            is_4w_only = (
+                row["4W Tyre Order"].strip().lower() == "yes" and
+                row["4W Battery Order"].strip().lower() == "no" and
+                row["2W Tyre Order"].strip().lower() == "no" and
+                row["2W Battery Order"].strip().lower() == "no"
+            )
+
+            if is_serviceable:
                 st.success("✅ Serviceable")
 
-                # Vendor fitment logic (only for 4W_Tyre, 4W_Battery, 2W_Battery)
-                if vendor_column:
-                    vendor_fitment = row.iloc[0][vendor_column]
-                    if vendor_fitment.strip().lower() == "yes":
+                # Vendor Fitment
+                if service_type in VENDOR_COLUMN:
+                    vendor_val = row.get(VENDOR_COLUMN[service_type], "").strip().lower()
+                    if vendor_val == "yes":
                         st.info("🚚 Vendor Fitment Available")
                     else:
                         st.info("🚚 Vendor Fitment Not Available")
 
-                # Extra fitment fees
-                fee_col = [col for col in row.columns if "Extra fitment fees" in col and service_type.split("_")[0] in col and service_type.split("_")[1] in col]
-                if fee_col:
-                    fee = row.iloc[0][fee_col[0]]
+                # Fee
+                fee = row.get(FEE_COLUMN[service_type], "")
+                try:
                     if pd.notna(fee) and float(fee) > 0:
-                        st.warning(f"💰 Fitment Fee: ₹{fee}")
+                        st.info(f"💰 Fitment Fee: ₹{int(float(fee))}")
+                except ValueError:
+                    pass  # in case fee is '-' or invalid
 
-                # Remark display logic
-                remark = row.iloc[0]["Remark"]
-                if service_type in ["4W_Tyre", "4W_Battery"] and pd.notna(remark):
-                    st.info(f"📝 Remark: {remark}")
-
-                # Additional condition for "only 4W Tyre available"
-                if service_type == "4W_Tyre":
-                    if (
-                        row.iloc[0]["4W Tyre Order"].strip().lower() == "yes" and
-                        row.iloc[0]["4W Battery Order"].strip().lower() != "yes" and
-                        row.iloc[0]["2W Tyre Order"].strip().lower() != "yes" and
-                        row.iloc[0]["2W Battery Order"].strip().lower() != "yes"
-                    ):
-                        st.info("🟡 Remark: Only 4W Tyre available — check with CM before confirming.")
+                # Remark
+                if service_type in ["4W_Tyre", "4W_Battery"]:
+                    remark = row.get("Remark", "")
+                    if service_type == "4W_Tyre" and is_4w_only:
+                        st.warning("🟡 Remark: Only 4W Tyre available — check with CM before confirming.")
+                    elif pd.notna(remark) and remark.strip() and remark.strip() != "-":
+                        st.info(f"📝 Remark: {remark}")
             else:
                 st.error("❌ Not Serviceable")
