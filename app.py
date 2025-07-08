@@ -3,7 +3,7 @@ import pandas as pd
 import requests
 from io import StringIO
 
-# Read the Google Sheet CSV (hidden via environment variable or hardcoded here)
+# Read the Google Sheet CSV
 SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTC7eGFDO4cthDWrY91NA5O97zFMeNREoy_wE5qDqCY6BcI__tBjsLJuZxAvaUyV48ZMZRJSQP1W-5G/pub?gid=0&single=true&output=csv"
 
 # Load data from Google Sheet
@@ -59,7 +59,7 @@ if check:
 
             is_serviceable = row[SERVICE_COLUMN[service_type]].strip().lower() == "yes"
 
-            # Check for special case: only 4W_Tyre = Yes, rest No
+            # Check for special case: only 4W Tyre = Yes, rest = No
             is_4w_only = (
                 row["4W Tyre Order"].strip().lower() == "yes" and
                 row["4W Battery Order"].strip().lower() == "no" and
@@ -78,20 +78,20 @@ if check:
                     else:
                         st.info("🚚 Vendor Fitment Not Available")
 
-                # Fee
+                # Fitment Fee
                 fee = row.get(FEE_COLUMN[service_type], "")
                 try:
                     if pd.notna(fee) and float(fee) > 0:
                         st.info(f"💰 Fitment Fee: ₹{int(float(fee))}")
                 except ValueError:
-                    pass  # in case fee is '-' or invalid
+                    pass  # Handle unexpected values like '-'
 
-                # Remark
-                if service_type in ["4W_Tyre", "4W_Battery"]:
-                    remark = row.get("Remark", "")
-                    if service_type == "4W_Tyre" and is_4w_only:
-                        st.warning("🟡 Remark: Only 4W Tyre available — check with CM before confirming.")
-                    elif pd.notna(remark) and remark.strip() and remark.strip() != "-":
-                        st.info(f"📝 Remark: {remark}")
+                # Remarks logic (updated)
+                remark = row.get("Remark", "")
+                if service_type == "4W_Tyre" and is_4w_only:
+                    st.warning("🟡 Remark: Only 4W Tyre available — check with CM before confirming.")
+                elif pd.notna(remark) and remark.strip() and remark.strip() != "-":
+                    st.info(f"📝 Remark: {remark.strip()}")
+
             else:
                 st.error("❌ Not Serviceable")
