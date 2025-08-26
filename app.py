@@ -10,7 +10,15 @@ SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vTC7eGFDO4cthDWrY91
 @st.cache_data
 def load_data():
     response = requests.get(SHEET_URL)
-    df = pd.read_csv(StringIO(response.text), dtype={'Pincode': str})
+    df = pd.read_csv(StringIO(response.text), dtype=str)
+
+    # Normalize headers (strip, lowercase, remove BOM)
+    df.columns = (
+        df.columns
+        .str.strip()
+        .str.replace('\ufeff', '', regex=True)
+        .str.lower()
+    )
     return df
 
 df = load_data()
@@ -25,12 +33,12 @@ service_type = st.selectbox("🛠️ Service Type", ["4W_Tyre", "4W_Battery", "2
 pincode = st.text_input("📍 Enter Pincode", max_chars=6)
 check = st.button("🔍 Check Serviceability")
 
-# Column map
+# Column map (lowercased to match normalized headers)
 SERVICE_COLUMN = {
-    "4W_Tyre": "4W Tyre Order",
-    "4W_Battery": "4W Battery Order",
-    "2W_Tyre": "2W Tyre Order",
-    "2W_Battery": "2W Battery Order"
+    "4W_Tyre": "4w tyre order",
+    "4W_Battery": "4w battery order",
+    "2W_Tyre": "2w tyre order",
+    "2W_Battery": "2w battery order"
 }
 
 # Check Logic
@@ -38,7 +46,8 @@ if check:
     if not pincode.isdigit():
         st.error("🚫 Invalid pincode. Enter a number like 400001.")
     else:
-        row = df[df['Pincode'] == pincode]
+        row = df[df['pincode'] == pincode]
+
         if row.empty:
             st.error("🚫 Pincode not found.")
         else:
@@ -47,10 +56,10 @@ if check:
 
             # Check if only 4W Tyre is available
             is_4w_only = (
-                row["4W Tyre Order"].strip().lower() == "yes" and
-                row["4W Battery Order"].strip().lower() == "no" and
-                row["2W Tyre Order"].strip().lower() == "no" and
-                row["2W Battery Order"].strip().lower() == "no"
+                row["4w tyre order"].strip().lower() == "yes" and
+                row["4w battery order"].strip().lower() == "no" and
+                row["2w tyre order"].strip().lower() == "no" and
+                row["2w battery order"].strip().lower() == "no"
             )
 
             if is_serviceable:
@@ -61,7 +70,7 @@ if check:
                     st.warning("🟡 Only 4W Tyre is serviceable — check with CM before confirming.")
 
                 # Show remark if present
-                remark = row.get("Remark", "")
+                remark = row.get("remark", "")
                 if pd.notna(remark) and remark.strip() and remark.strip() != "-":
                     st.info(f"📝 Remark: {remark.strip()}")
 
