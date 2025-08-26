@@ -14,31 +14,32 @@ st.set_page_config(page_title="TNM Serviceability Checker", layout="centered")
 # =========================
 # Config (ONLY SHEET_URL)
 # =========================
+# Use your export CSV link (works without "Publish to web" if the sheet is Anyone-with-link Viewer)
 DEFAULT_SHEET_URL = (
-    "https://docs.google.com/spreadsheets/d/e/2PACX-1vTC7eGFDO4cthDWrY91NA5O97zFMeNREoy_wE5qDqCY6BcI__tBjsLJuZxAvaUyV48ZMZRJSQP1W-5G/pub?output=csv"
+    "https://docs.google.com/spreadsheets/d/1oZMHCIE7mFPYOV1i28bCIihMBIVbi0nB-Xv4C3X51kY/export?format=csv&gid=0"
 )
 
 def get_config_value(key: str, default: str):
-    """Prefer env var, then secrets (if present), else default.
-    Never access st.secrets unless wrapped in try/except."""
-    # 1) ENV
+    """Prefer ENV var, then secrets (if present), else default. Safe if secrets.toml is absent."""
     v = os.environ.get(key)
     if v:
         return v, "env"
-    # 2) SECRETS (optional)
     try:
         v = st.secrets.get(key)  # may raise if no secrets.toml
         if v:
             return v, "secrets"
     except Exception:
         pass
-    # 3) DEFAULT
     return default, "default"
 
 SHEET_URL, SHEET_URL_SRC = get_config_value("SHEET_URL", DEFAULT_SHEET_URL)
 
-USER_AGENT = {"User-Agent": "Mozilla/5.0 (compatible; ServiceabilityBot/1.0)"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (compatible; ServiceabilityBot/1.0)",
+    "Accept": "text/csv, text/plain;q=0.9, */*;q=0.8",
+}
 
+# Canonical service keys we expose in UI
 SERVICE_CANONICAL = {
     "4W_Tyre": "4w tyre order",
     "4W_Battery": "4w battery order",
@@ -91,7 +92,12 @@ def _looks_like_csv(text: str) -> bool:
     return ("," in text or "\t" in text) and ("\n" in text)
 
 def _variants_of_sheet_url(u: str):
-    """Generate a few safe variants of the same published CSV URL."""
+    """
+    Support both:
+      - export CSV links (preferred)
+      - published /pub links
+      - normal edit links (auto-convert to export/gviz)
+    """
     variants = []
     if not u:
         return variants
@@ -101,23 +107,37 @@ def _variants_of_sheet_url(u: str):
     try:
         p = urlparse(u)
         q = dict(parse_qsl(p.query, keep_blank_values=True))
+        path = p.path
 
-        # force CSV
-        q2 = dict(q); q2["output"] = "csv"
-        v2 = urlunparse(p._replace(query=urlencode(q2, doseq=True)))
-        variants.append(v2)
+        # If it's a published link (/d/e/2PACX.../pub)
+        if "/spreadsheets/d/e/" in path and "/pub" in path:
+            q2 = dict(q); q2["output"] = "csv"
+            v2 = urlunparse(p._replace(query=urlencode(q2, doseq=True)))
+            variants.append(v2)
+            q3 = dict(q2); q3.pop("single", None)
+            v3 = urlunparse(p._replace(query=urlencode(q3, doseq=True)))
+            variants.append(v3)
+            variants.append(v2 + ("&" if "?" in v2 else "?") + "cachebust=1")
 
-        # drop 'single' if present
-        q3 = dict(q2); q3.pop("single", None)
-        v3 = urlunparse(p._replace(query=urlencode(q3, doseq=True)))
-        variants.append(v3)
+        # If it's a normal view/edit URL (/spreadsheets/d/<ID>/edit#gid=123)
+        if "/spreadsheets/d/" in path and "/spreadsheets/d/e/" not in path:
+            parts = path.split("/")
+            try:
+                idx = parts.index("d")
+                sheet_id = parts[idx + 1]
+                gid = "0"
+                if p.fragment and "gid=" in p.fragment:
+                    gid = dict(parse_qsl(p.fragment.replace("#", ""))).get("gid", "0")
+                exp = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+                gviz = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:csv&gid={gid}"
+                variants.extend([exp, gviz])
+            except Exception:
+                pass
 
-        # cache-bust
-        variants.append(v2 + ("&" if "?" in v2 else "?") + "cachebust=1")
     except Exception:
         pass
 
-    # de-dup, preserve order
+    # De-duplicate, preserve order
     out, seen = [], set()
     for v in variants:
         if v not in seen:
@@ -138,7 +158,7 @@ def load_data_with_fallbacks():
 
     for url in _variants_of_sheet_url(SHEET_URL):
         try:
-            r = requests.get(url, timeout=20, headers=USER_AGENT, allow_redirects=True)
+            r = requests.get(url, timeout=20, headers=HEADERS, allow_redirects=True)
             attempts.append((url, r.status_code))
             if r.status_code == 200 and _looks_like_csv(r.text):
                 df = pd.read_csv(StringIO(r.text), dtype=str)
@@ -154,14 +174,14 @@ def load_data_with_fallbacks():
                     df = df.rename(columns={pincode_col: "pincode"})
                 df["pincode"] = df["pincode"].astype(str).map(_digits_only)
 
-                # service cols
+                # resolve service cols
                 resolved = {}
                 for key, canonical in SERVICE_CANONICAL.items():
                     col = _resolve_service_col(list(df.columns), canonical)
                     if col:
                         resolved[key] = col
                     else:
-                        df[canonical] = "no"
+                        df[canonical] = "no"   # default if column missing
                         resolved[key] = canonical
 
                 # optional remark/notes
@@ -191,9 +211,8 @@ st.markdown(
 
 with st.sidebar:
     st.header("⚙️ Data Source")
-    st.caption("Using only SHEET_URL (env → secrets → default).")
+    st.caption("Using only SHEET_URL (ENV → secrets → default).")
     st.write("Source:", SHEET_URL_SRC)
-    # Show URL if not from secrets (to avoid leaking secrets accidentally)
     if SHEET_URL_SRC != "secrets":
         st.code(f"SHEET_URL = {SHEET_URL}", language="bash")
     show_debug = st.checkbox("Show debug info", value=False)
@@ -211,16 +230,41 @@ if df is None:
     st.error(
         "❌ Could not load the Google Sheet via SHEET_URL.\n\n"
         "**Checks:**\n"
-        "1) In Google Sheets: **File → Share → Publish to the web → Entire sheet → CSV** (republish after changes).\n"
-        "2) Ensure the link ends with `output=csv`.\n"
-        "3) If it still fails sometimes, re-copy the Publish link — Google rotates tokens occasionally.\n\n"
+        "1) In Google Sheets: **Share → General access → Anyone with the link → Viewer**.\n"
+        "2) Prefer an **export** link: `/export?format=csv&gid=<gid>` (you already have one).\n"
+        "3) If you used a published link earlier, re-copy the URL (tokens can expire).\n\n"
         f"Details: {err_msg}"
     )
     if attempts:
         with st.expander("Debug: fetch attempts"):
             for url, code in attempts:
                 st.write(code, url)
-    st.stop()
+
+    # Optional manual fallback: upload CSV so app still works during outages
+    st.info("As a fallback, upload the CSV manually:")
+    up = st.file_uploader("Upload CSV", type=["csv"])
+    if up is not None:
+        df = pd.read_csv(up, dtype=str)
+        df.columns = [_normalize_header(c) for c in df.columns]
+        pincode_col = _resolve_pincode_col(list(df.columns))
+        if not pincode_col:
+            st.error("Uploaded CSV has no pincode-like column."); st.stop()
+        if pincode_col != "pincode":
+            df = df.rename(columns={pincode_col: "pincode"})
+        df["pincode"] = df["pincode"].astype(str).map(_digits_only)
+        resolved = {}
+        for key, canonical in SERVICE_CANONICAL.items():
+            col = _resolve_service_col(list(df.columns), canonical)
+            if col:
+                resolved[key] = col
+            else:
+                df[canonical] = "no"; resolved[key] = canonical
+        remark_col = next((c for c in df.columns if "remark" in c or "note" in c), None)
+        if remark_col and remark_col != "remark":
+            df = df.rename(columns={remark_col: "remark"})
+        SERVICE_COLUMN = resolved
+    else:
+        st.stop()
 
 if show_debug:
     st.write("Attempted URLs/status:", attempts)
