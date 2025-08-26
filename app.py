@@ -4,6 +4,7 @@ import requests
 import pandas as pd
 import streamlit as st
 from io import StringIO
+from urllib.parse import urlparse, parse_qsl, urlencode, urlunparse
 
 # =========================
 # Page config (must be first)
@@ -11,18 +12,14 @@ from io import StringIO
 st.set_page_config(page_title="TNM Serviceability Checker", layout="centered")
 
 # =========================
-# Config (env / secrets)
+# Config (ONLY SHEET_URL)
 # =========================
-# Option A (recommended): set SHEET_ID and SHEET_GID in Render env (or .streamlit/secrets.toml)
-# Option B: set SHEET_URL to a published CSV link (may rotate / rate-limit)
-DEFAULT_PUBLISH_URL = (
+# Put your published-to-web CSV link in Render env or .streamlit/secrets.toml as SHEET_URL
+DEFAULT_SHEET_URL = (
     "https://docs.google.com/spreadsheets/d/e/2PACX-1vTC7eGFDO4cthDWrY91NA5O97zFMeNREoy_wE5qDqCY6BcI__tBjsLJuZxAvaUyV48ZMZRJSQP1W-5G"
     "/pub?gid=0&single=true&output=csv"
 )
-
-SHEET_URL = st.secrets.get("SHEET_URL") or os.environ.get("SHEET_URL") or DEFAULT_PUBLISH_URL
-SHEET_ID = st.secrets.get("SHEET_ID") or os.environ.get("SHEET_ID")  # from URL /d/<SHEET_ID>/
-SHEET_GID = str(st.secrets.get("SHEET_GID") or os.environ.get("SHEET_GID") or "0")
+SHEET_URL = st.secrets.get("SHEET_URL") or os.environ.get("SHEET_URL") or DEFAULT_SHEET_URL
 
 USER_AGENT = {"User-Agent": "Mozilla/5.0 (compatible; ServiceabilityBot/1.0)"}
 
@@ -33,7 +30,6 @@ SERVICE_CANONICAL = {
     "2W_Tyre": "2w tyre order",
     "2W_Battery": "2w battery order",
 }
-
 PINCODE_SYNONYMS = ["pincode", "pin code", "pin", "postal code", "postcode", "zip", "zip code"]
 
 # =========================
@@ -47,11 +43,9 @@ def _normalize_header(col: str) -> str:
     return col
 
 def _guess_col(cols, targets, fuzzy_tokens=None):
-    # exact match first
     for t in targets:
         if t in cols:
             return t
-    # fuzzy: contains all tokens
     if fuzzy_tokens:
         for c in cols:
             if all(tok in c for tok in fuzzy_tokens):
@@ -81,14 +75,48 @@ def _looks_like_csv(text: str) -> bool:
         return False
     return ("," in text or "\t" in text) and ("\n" in text)
 
-def _candidate_urls():
-    urls = []
-    if SHEET_URL:
-        urls.append(SHEET_URL)
-    if SHEET_ID:
-        urls.append(f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export?format=csv&gid={SHEET_GID}")
-        urls.append(f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/gviz/tq?tqx=out:csv&gid={SHEET_GID}")
-    return urls
+def _variants_of_sheet_url(u: str):
+    """
+    Build a few safe variants of the same published CSV URL,
+    without needing Sheet ID/GID separately.
+    """
+    variants = []
+    if not u:
+        return variants
+
+    # 1) As-is
+    variants.append(u)
+
+    try:
+        p = urlparse(u)
+        q = dict(parse_qsl(p.query, keep_blank_values=True))
+
+        # 2) Force output=csv
+        q2 = dict(q)
+        q2["output"] = "csv"
+        v2 = urlunparse(p._replace(query=urlencode(q2, doseq=True)))
+        variants.append(v2)
+
+        # 3) Same but drop 'single' if present (sometimes helps with 400s)
+        q3 = dict(q2)
+        q3.pop("single", None)
+        v3 = urlunparse(p._replace(query=urlencode(q3, doseq=True)))
+        variants.append(v3)
+
+        # 4) Cache-bust param
+        variants.append(v2 + ("&" if "?" in v2 else "?") + "cachebust=1")
+
+    except Exception:
+        pass
+
+    # De-duplicate while preserving order
+    seen = set()
+    out = []
+    for v in variants:
+        if v not in seen:
+            seen.add(v)
+            out.append(v)
+    return out
 
 # =========================
 # Data loader with fallbacks
@@ -104,7 +132,7 @@ def load_data_with_fallbacks():
     attempts = []
     last_err = None
 
-    for url in _candidate_urls():
+    for url in _variants_of_sheet_url(SHEET_URL):
         try:
             r = requests.get(url, timeout=20, headers=USER_AGENT, allow_redirects=True)
             attempts.append((url, r.status_code))
@@ -129,11 +157,10 @@ def load_data_with_fallbacks():
                     if col:
                         resolved[key] = col
                     else:
-                        # create a default "no" column if missing
-                        df[canonical] = "no"
+                        df[canonical] = "no"   # default if column missing
                         resolved[key] = canonical
 
-                # remark column (optional)
+                # optional remark column
                 remark_col = next((c for c in df.columns if "remark" in c or "note" in c), None)
                 if remark_col and remark_col != "remark":
                     df = df.rename(columns={remark_col: "remark"})
@@ -160,7 +187,8 @@ st.markdown(
 
 with st.sidebar:
     st.header("⚙️ Data Source")
-    st.caption("Set SHEET_ID + SHEET_GID (recommended) or SHEET_URL via Render env or .streamlit/secrets.toml.")
+    st.caption("Only SHEET_URL is used. Put your published CSV link in env or secrets.")
+    st.code(f"SHEET_URL = {SHEET_URL}", language="bash")
     show_debug = st.checkbox("Show debug info", value=False)
 
 # =========================
@@ -176,12 +204,11 @@ else:
 
 if df is None:
     st.error(
-        "❌ Could not load the Google Sheet.\n\n"
-        "**Quick fixes:**\n"
-        "1) In Google Sheets, set **Share → Anyone with the link (Viewer)**.\n"
-        "2) Prefer the stable export URL:\n"
-        "   `https://docs.google.com/spreadsheets/d/<SHEET_ID>/export?format=csv&gid=<GID>`\n"
-        "3) In Render, set env vars: `SHEET_ID` and `SHEET_GID` (or `SHEET_URL`).\n\n"
+        "❌ Could not load the Google Sheet via SHEET_URL.\n\n"
+        "**Checks:**\n"
+        "1) In Google Sheets: **File → Share → Publish to the web → Entire sheet → CSV** (republish if you changed sharing).\n"
+        "2) Ensure the link ends with `output=csv`.\n"
+        "3) Try toggling 'Single' in the publish dialog (adds/removes `single=true`).\n\n"
         f"Details: {err_msg}"
     )
     if attempts:
@@ -217,12 +244,10 @@ if check:
             st.error("🚫 Pincode not found.")
         else:
             row = row_df.iloc[0]
-            # column name already resolved for the chosen service
             service_col = SERVICE_COLUMN[service_type]
             val = str(row.get(service_col, "")).strip().lower()
             is_serviceable = val == "yes"
 
-            # helper to evaluate yes/no across possibly varied headers
             def safe_yes(canonical_text):
                 mapping = {
                     "4w tyre order": SERVICE_COLUMN.get("4W_Tyre"),
