@@ -15,8 +15,7 @@ st.set_page_config(page_title="TNM Serviceability Checker", layout="centered")
 # Config (ONLY SHEET_URL)
 # =========================
 DEFAULT_SHEET_URL = (
-    "https://docs.google.com/spreadsheets/d/e/2PACX-1vTC7eGFDO4cthDWrY91NA5O97zFMeNREoy_wE5qDqCY6BcI__tBjsLJuZxAvaUyV48ZMZRJSQP1W-5G"
-    "/pub?gid=0&single=true&output=csv"
+    "https://docs.google.com/spreadsheets/d/e/2PACX-1vTC7eGFDO4cthDWrY91NA5O97zFMeNREoy_wE5qDqCY6BcI__tBjsLJuZxAvaUyV48ZMZRJSQP1W-5G/pub?gid=0&single=true&output=csv"
 )
 
 def get_config_value(key: str, default: str):
